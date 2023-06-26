@@ -1,0 +1,33 @@
+.md-header {
+  height: 2.8rem;
+}
+.md-header-nav {
+  height: 100%;
+  align-items: center;
+}
+.md-header-nav__button.md-logo {
+  padding: 0rem;
+}
+.md-header-nav__title {
+  height: 100%;
+  line-height: 2.8rem;
+}
+
+.md-header-nav__button.md-logo img {
+  width: 50px;
+  height: 40px;
+  position: relative;
+}
+.md-footer-meta {
+  display: none;
+}
+
+@media screen and (max-width: 44.9375em) {
+  .md-footer-nav__link--prev,
+  .md-footer-nav__link--next {
+    width: 50%;
+  }
+  .md-footer-nav__link--prev .md-footer-nav__title {
+    display: initial;
+  }
+}

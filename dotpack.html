@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+<body>
+    <canvas id="myCanvas" width="320" height="320"></canvas>
+    <button id="connect">连接</button>
+    <button id="up">上</button>
+    <button id="down">下</button>
+    <button id="left">左</button>
+    <button id="right">右</button>
+    <input type="text" id="myInput">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
+    <script>
+const MODEL_NBR_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E".toLowerCase();
+const CHARACTERISTIC_UUID_RX = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E".toLowerCase();
+const CHARACTERISTIC_UUID_TX = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E".toLowerCase();
+
+class DotPack {
+    constructor(canvas) {
+        this.size = 16;
+        this.pixelSize = 20;
+        this.grid = new Array(this.size).fill(0).map(() => new Array(this.size).fill(0));
+        this.server = null;
+        this.device = null;
+        this.disconnected = true;
+        this.readCharacteristic = null;
+        this.writeCharacteristic = null;
+        this.service = null;
+        this.canvas = canvas;
+        this.canvas_ctx = null;
+        this.config = null;
+        if (this.canvas) {
+            this.canvas_ctx = canvas.getContext('2d');
+            this._draw()
+        }
+        fetch('https://alioss.aimaker.space/led_bag/dotpack.yml')
+        .then(response => response.text())
+        .then(yamlData => {
+            this.config = jsyaml.load(yamlData);
+        });
+
+    }
+    _getRGB = (color) => {
+        /**
+         * #ff0000
+         * red
+         * rgb(255,0,0)
+         **/
+        if (typeof color === "string") {
+            if (color.includes("#")) {
+                color = color.replace("#", "");
+            } else {
+                color = this.config.colors[color]
+            }
+        } else if (typeof color === "object") {
+            // TODO: rgb(255,0,0)
+        } else {
+            // error
+        }
+        return color
+    }
+    _drawPixel = (x, y, color) => {
+        this.canvas_ctx.fillStyle = color;
+        this.canvas_ctx.strokeStyle = 'grey';
+        this.canvas_ctx.lineWidth = 1;
+        this.canvas_ctx.fillRect(y * this.pixelSize, x * this.pixelSize, this.pixelSize, this.pixelSize);
+        this.canvas_ctx.strokeRect(y * this.pixelSize, x * this.pixelSize, this.pixelSize, this.pixelSize);
+    }
+    _draw = () => {
+        for(let row = 0; row < this.size; row++) {
+            for(let col = 0; col < this.size; col++) {
+                this._drawPixel(row, col, this.grid[row][col]);
+            }
+        }
+    }
+
+    isConnected = () => {
+        if (!this.server) return false;
+        return this.server.connected;
+    }
+
+    _writeChar = (charArray) => {
+        console.log(charArray);
+        let arrayBuffer = this.stringToArrayBuffer(charArray);
+        this.writeCharacteristic.writeValue(arrayBuffer);
+    }
+    _writeChars = (charArrayList, cursor = 0, timeout = 500) => {
+        if (cursor < charArrayList.length) {
+            this._writeChar(charArrayList[cursor]);
+            setTimeout(() => {this._writeChars(charArrayList, cursor + 1)}, timeout);
+        }
+    }
+
+    _command = (operate, params) => {
+        const commands = {
+            "on": "$1 1;",
+            "off": "$1 0;",
+            "clear": "$5 1;",
+            "clear2": "$1 3;",
+            "getMTU": "$1 4;",
+        }
+        let commandChars = [];
+        if (operate == "write") {
+            if (params.length > 0) {
+                console.log(params);
+                this._writeChar(params)
+            }
+            return
+        } else if (operate == "games") {
+            // 选择游戏 - (1:迷宫，2：贪吃蛇，3：俄罗斯方块，4：打砖块)
+            // 游戏操作 - (10：向上移动，11:向右移动，12：向下移动，13：向左移动，14：OK键，15：暂停，16：继续)
+            commandChars.push("$3 %d;".replace("%d", params))
+        } else if (operate == "brightness") {
+            commandChars.push("$4 0 %d;".replace("%d", params))
+        } else {
+            commandChars.push(commands[operate])
+        }
+        commandChars.forEach(element => {
+            this._writeChar(element)
+        });
+    }
+    connect = () => {
+        if (!navigator.bluetooth) {
+            console.log(
+                "Web Bluetooth API is not available.\n" +
+                    "Please make sure the Web Bluetooth flag is enabled."
+            );
+            return;
+        }
+        // 开发的时候放出下面这行
+        if (this.readCharacteristic == null) {
+            return navigator.bluetooth
+                .requestDevice({
+                    filters: [
+                        {
+                            services: [MODEL_NBR_UUID],
+                        },
+                    ],
+                })
+                .then((device) => {
+                    // device.gatt.requestMtu(512);
+                    this.device = device;
+                    console.log("Connecting to GATT Server...", device);
+                    return device.gatt.connect();
+                })
+                .then((gattServer) => {
+                    console.log("> Found GATT gattServer");
+                    this.server = gattServer;
+                    this.disconnected = false;
+                    this.device.addEventListener(
+                        "gattserverdisconnected",
+                        (event) => {
+                            this.onDisconnected(event);
+                        }
+                    );
+                    return gattServer.getPrimaryService(MODEL_NBR_UUID);
+                })
+                .then((service) => {
+                    console.log("> Found service", service);
+                    this.service = service;
+                    // Get write characteristic
+                    // 赋予写入权限
+                    return this.service.getCharacteristic(
+                        CHARACTERISTIC_UUID_RX
+                    );
+                })
+                .then((service) => {
+                    console.log("> Found service22222", service);
+                    this.writeCharacteristic = service;
+
+                    // Get write characteristic
+                    // 赋予订阅通知权限
+                    return this.service.getCharacteristic(
+                        CHARACTERISTIC_UUID_TX
+                    );
+                })
+                .then((characteristic) => characteristic.startNotifications())
+                .then((characteristic) => {
+                    this.readCharacteristic = characteristic;
+                    this.readCharacteristic.addEventListener(
+                        "characteristicvaluechanged",
+                        this.handleCharacteristicValueChanged.bind(this)
+                    );
+                    this._writeChar("getmtu$1 4;");
+                    return new Promise((resolve, reject) => {
+                        setTimeout(() => {
+                            this._writeChar("$17 0;");
+                            resolve();
+                        }, 500);
+                    });
+                })
+                .catch((e) => {
+                    this._handleRequestError(e);
+                });
+        }
+    }
+
+    disconnect = () => {}
+    _setImg = () => {
+
+    }
+    setPixel = (x, y, color) => {
+        this.grid[x][y] = color;
+        // 虚拟像素板
+        this._drawPixel(x, y, color)
+        // TODO: 设备驱动
+        let colorRGB = this._getRGB(color);
+        this._writeChars([
+            `$5 0 ${colorRGB};`,
+            `$5 3 ${y} ${x};`
+        ]);
+    }
+    setColor = (color) => {
+        this.grid.forEach(row => row.fill(color));
+        // 虚拟像素板
+        this._draw();
+        // TODO: 设备驱动
+        let colorRGB = this._getRGB(color);
+        this._writeChars([
+            `$5 0 ${colorRGB};`,
+            "$5 2;"
+        ]);
+    }
+    setMode = (mode) => {
+        let modeChar = this.config.modes[mode];
+        this._writeChar(modeChar);
+    }
+    load = (name) => {
+
+    }
+    gameMode = (mode) => {
+        let modeChar = this.config.games[mode];
+        this._writeChar(modeChar);
+    }
+    gameControl = (cmd) => {
+        let cmdChar = this.config.game_cmds[cmd];
+        this._writeChar(cmdChar);
+    }
+
+    handleCharacteristicValueChanged(event) {
+        const data = this.arrayBufferToString(event.target.value.buffer);
+        // console.log("收到characteristicvaluechanged", data);
+        if (data.includes("drawCircle")) {
+            console.log("画图响应", data);
+            if (
+                this.drawCirclergbArrayIndex <
+                this.drawCirclergbArray.length - 1
+            ) {
+                this.drawCirclergbArrayIndex++;
+                this.writeCharacteristic.writeValue(
+                    this.stringToArrayBuffer(
+                        this.drawCirclergbArray[this.drawCirclergbArrayIndex]
+                    )
+                );
+            }
+        }
+        if (data.includes("getmtu")) {
+            console.log("获取MTU", data);
+        }
+    }
+    // 断开连接
+    onDisconnected = () => {
+        if (!this.server) return;
+        this.server.disconnect();
+        this.server = null;
+        this.device = null;
+        this.readCharacteristic = null;
+        this.disconnected = true;
+        this.writeCharacteristic = null;
+    }
+    _handleRequestError(e) {
+        console.log(e)
+    }
+    // 字符串格式转为 ArrayBuffer
+    stringToArrayBuffer(str) {
+        var bytes = new Array();
+        var len, c;
+        len = str.length;
+        for (var i = 0; i < len; i++) {
+            c = str.charCodeAt(i);
+            if (c >= 0x010000 && c <= 0x10ffff) {
+                bytes.push(((c >> 18) & 0x07) | 0xf0);
+                bytes.push(((c >> 12) & 0x3f) | 0x80);
+                bytes.push(((c >> 6) & 0x3f) | 0x80);
+                bytes.push((c & 0x3f) | 0x80);
+            } else if (c >= 0x000800 && c <= 0x00ffff) {
+                bytes.push(((c >> 12) & 0x0f) | 0xe0);
+                bytes.push(((c >> 6) & 0x3f) | 0x80);
+                bytes.push((c & 0x3f) | 0x80);
+            } else if (c >= 0x000080 && c <= 0x0007ff) {
+                bytes.push(((c >> 6) & 0x1f) | 0xc0);
+                bytes.push((c & 0x3f) | 0x80);
+            } else {
+                bytes.push(c & 0xff);
+            }
+        }
+        var array = new Int8Array(bytes.length);
+        for (var i in bytes) {
+            array[i] = bytes[i];
+        }
+        return array.buffer;
+    }
+    // ArrayBuffer 格式转为字符串
+    arrayBufferToString(arr) {
+        if (typeof arr === "string") {
+            return arr;
+        }
+        var dataview = new DataView(arr);
+        var ints = new Uint8Array(arr);
+        for (var i = 0; i < ints.length; i++) {
+            ints[i] = dataview.getUint8(i);
+        }
+        arr = ints;
+        var str = "",
+            _arr = arr;
+        for (var i = 0; i < _arr.length; i++) {
+            var one = _arr[i].toString(2),
+                v = one.match(/^1+?(?=0)/);
+            if (v && one.length == 8) {
+                var bytesLength = v[0].length;
+                var store = _arr[i].toString(2).slice(7 - bytesLength);
+                for (var st = 1; st < bytesLength; st++) {
+                    store += _arr[st + i].toString(2).slice(2);
+                }
+                str += String.fromCharCode(parseInt(store, 2));
+                i += bytesLength - 1;
+            } else {
+                str += String.fromCharCode(_arr[i]);
+            }
+        }
+        return str;
+    }
+}
+    </script>
+    <script>
+        const fill = () => {
+            if (col < pack.size) {
+                pack.setPixel(0, col, "pink");
+                col += 1;
+                setTimeout(fill, 1000);
+            }
+        }
+        const canvas = document.getElementById('myCanvas');
+        pack = new DotPack(canvas)
+        let col = 0;
+        // fill();
+        const input = document.getElementById('myInput');
+        const connectBtn = document.getElementById('connect');
+        connectBtn.onclick = () => {
+            pack.connect();
+        }
+        const upBtn = document.getElementById('up');
+        upBtn.onclick = () => {
+            pack.gameControl("up");
+        }
+        const downBtn = document.getElementById('down');
+        downBtn.onclick = () => {
+            pack.gameControl("down");
+        }
+        const leftBtn = document.getElementById('left');
+        leftBtn.onclick = () => {
+            pack.gameControl("left");
+        }
+        const rightBtn = document.getElementById('right');
+        rightBtn.onclick = () => {
+            pack.gameControl("right");
+        }
+        input.addEventListener('keypress', function(event) {
+            console.log(event.key);
+            const keyMap = {
+                "w": "up",
+                "s": "down",
+                "a": "left",
+                "d": "right",
+                "Enter": "ok",
+                " ": "pause",
+                "c": "continue"
+            }
+            pack.gameControl(keyMap[event.key]);
+        });
+    </script>
+</body>
+</html>
